@@ -102,6 +102,10 @@ module ActiveRecord
         singleton_class.send :define_method, name do |*args|
           scopes[name].call(self, *args)
         end
+        
+        subclasses.each do |s|
+          s.scopes[name] = scopes[name]
+        end
       end
     end
 
