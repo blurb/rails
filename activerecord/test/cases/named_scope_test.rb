@@ -349,6 +349,11 @@ class NamedScopeTest < ActiveRecord::TestCase
       Comment.for_first_post.for_first_author.all
     end
   end
+  
+  def test_dynamically_added_scopes_are_inherited
+    Comment.named_scope :thoughtful, :conditions => "body LIKE '%think%'"
+    assert_equal SpecialComment.thoughtful.find(3), SpecialComment.find(3)
+  end
 end
 
 class DynamicScopeMatchTest < ActiveRecord::TestCase  
