@@ -5,12 +5,18 @@ require 'rails/rack'
 require 'fileutils'
 
 class RackStaticTest < ActiveSupport::TestCase
+
   def setup
+    @non_public_path = "#{RAILS_ROOT}/non_public_file.html"
     FileUtils.cp_r "#{RAILS_ROOT}/fixtures/public", "#{RAILS_ROOT}/public"
+    File.open(@non_public_path, 'w') do |file|
+      file.puts "non public content"
+    end
   end
 
   def teardown
     FileUtils.rm_rf "#{RAILS_ROOT}/public"
+    FileUtils.rm(@non_public_path)
   end
 
   DummyApp = lambda { |env|
@@ -38,6 +44,38 @@ class RackStaticTest < ActiveSupport::TestCase
     assert_equal "/foo/index.html", get("/foo/index.html")
     assert_equal "/foo/index.html", get("/foo/")
     assert_equal "/foo/index.html", get("/foo")
+  end
+
+  test "does not betray the existance of files outside root" do
+    path = "../non_public_file.html"
+    assert File.exist?(File.join(RAILS_ROOT, 'public', path))
+    assert_equal get("/nofile"), get(path)
+  end
+
+  test "does not betray the existance of unreadable files" do
+    begin
+      filename = 'unreadable.html.erb'
+      target = File.join(RAILS_ROOT, 'public', filename)
+      FileUtils.touch target
+      File.expects(:readable?).with(target).returns(false).at_least_once
+      assert File.exist? target
+      assert !File.readable?(target)
+      path = "/#{filename}"
+      assert_equal get("/nofile"), get(path)
+    ensure
+      File.unlink target
+    end
+  end
+
+  test "does not betray the existance of files outside root when using alternate path separators" do
+    if Dir.pwd.starts_with?('/vagrant')
+      $stderr.puts "Can't test file permissions on a vagrant share"
+      return
+    end
+    filename = 'non_public_file.html'
+    assert File.exist?(File.join(RAILS_ROOT, filename))
+    path = "/%5C..%2F#{filename}"
+    assert_equal get("/nofile"), get(path)
   end
 
   private

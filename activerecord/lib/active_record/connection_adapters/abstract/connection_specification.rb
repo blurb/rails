@@ -10,7 +10,7 @@ module ActiveRecord
     ##
     # :singleton-method:
     # The connection handler
-    class_attribute :connection_handler
+    class_attribute :connection_handler, :instance_writer => false
     self.connection_handler = ConnectionAdapters::ConnectionHandler.new
 
     # Returns the connection currently associated with the class. This can
@@ -74,6 +74,10 @@ module ActiveRecord
               require "active_record/connection_adapters/#{spec[:adapter]}_adapter"
             rescue LoadError
               raise "Please install the #{spec[:adapter]} adapter: `gem install activerecord-#{spec[:adapter]}-adapter` (#{$!})"
+            end
+          ensure
+            if spec[:adapter] == 'mysql2' && defined?(ConnectionAdapters::Mysql2Adapter) && RUBY_VERSION >= '2.4' && !defined?(ConnectionAdapters::Mysql2Adapter::Fixnum)
+              ConnectionAdapters::Mysql2Adapter.const_set(:Fixnum, ::Integer)
             end
           end
 

@@ -52,7 +52,7 @@ class NamedScopeTest < ActiveRecord::TestCase
   end
 
   def test_scope_should_respond_to_own_methods_and_methods_of_the_proxy
-    assert Topic.approved.respond_to?(:proxy_found)
+    assert Topic.approved.respond_to?(:proxy_found, true)
     assert Topic.approved.respond_to?(:count)
     assert Topic.approved.respond_to?(:length)
   end
@@ -347,6 +347,13 @@ class NamedScopeTest < ActiveRecord::TestCase
   def test_table_names_for_chaining_scopes_with_and_without_table_name_included
     assert_nothing_raised do
       Comment.for_first_post.for_first_author.all
+    end
+  end
+
+  def test_respond_to_should_not_trigger_queries
+    assert_no_queries do
+      assert Topic.base.respond_to?(:approved)
+      assert !Topic.base.respond_to?(:foobar)
     end
   end
 end
