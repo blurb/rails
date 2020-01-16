@@ -1,5 +1,3 @@
-require 'digest/sha2'
-
 module ActiveRecord
   # A session store backed by an Active Record class.  A default class is
   # provided, but any object duck-typing to an Active Record Session class
@@ -43,8 +41,6 @@ module ActiveRecord
   # The example SqlBypass class is a generic SQL session store.  You may
   # use it as a basis for high-performance database-specific stores.
   class SessionStore < ActionController::Session::AbstractStore
-    ID_PREFIX = '2::'
-
     # The default Active Record class.
     class Session < ActiveRecord::Base
       ##
@@ -53,45 +49,18 @@ module ActiveRecord
       cattr_accessor :data_column_name
       self.data_column_name = 'data'
 
-      cattr_writer :session_id_column
-
       before_save :marshal_data!
       before_save :raise_on_session_data_overflow!
 
-      def session_id=(id)
-        write_attribute(self.class.session_id_column, id)
-      end
-
-      def secure!
-        raw_session_id = read_attribute(self.class.session_id_column)
-        if raw_session_id.start_with?(ID_PREFIX)
-          # is already secure
-        else
-          # is a public session id
-          private_session_id = SessionStore.hash_session_id(raw_session_id)
-          self.session_id = private_session_id
-          update_without_callbacks
-        end
-      end
-
       class << self
-        def session_id_column
-          @@session_id_column ||= begin
-            reset_column_information
-            if columns_hash['sessid']
-              :sessid
-            else
-              :session_id
-            end
-          end
-        end
-
         def data_column_size_limit
           @data_column_size_limit ||= columns_hash[@@data_column_name].limit
         end
 
+        # Hook to set up sessid compatibility.
         def find_by_session_id(session_id)
-          find(:first, :conditions => { session_id_column => session_id })
+          setup_sessid_compatibility!
+          find_by_session_id(session_id)
         end
 
         def marshal(data)
@@ -115,6 +84,25 @@ module ActiveRecord
         def drop_table!
           connection.execute "DROP TABLE #{table_name}"
         end
+
+        private
+          # Compatibility with tables using sessid instead of session_id.
+          def setup_sessid_compatibility!
+            # Reset column info since it may be stale.
+            reset_column_information
+            if columns_hash['sessid']
+              def self.find_by_session_id(*args)
+                find_by_sessid(*args)
+              end
+
+              define_method(:session_id)  { sessid }
+              define_method(:session_id=) { |session_id| self.sessid = session_id }
+            else
+              def self.find_by_session_id(session_id)
+                find :first, :conditions => {:session_id=>session_id}
+              end
+            end
+          end
       end
 
       # Lazy-unmarshal session state.
@@ -197,7 +185,7 @@ module ActiveRecord
         # Look up a session by id and unmarshal its data if found.
         def find_by_session_id(session_id)
           if record = connection.select_one("SELECT * FROM #{@@table_name} WHERE #{@@session_id_column}=#{connection.quote(session_id)}")
-            new(:retrieved_by => session_id, :session_id => session_id, :marshaled_data => record['data'])
+            new(:session_id => session_id, :marshaled_data => record['data'])
           end
         end
 
@@ -224,15 +212,15 @@ module ActiveRecord
         end
       end
 
+      attr_reader :session_id
       attr_writer :data
-      attr_accessor :session_id
 
       # Look for normal and marshaled data, self.find_by_session_id's way of
       # telling us to postpone unmarshaling until the data is requested.
       # We need to handle a normal data attribute in case of a new record.
       def initialize(attributes)
-        @retrieved_by, @session_id, @data, @marshaled_data = attributes[:retrieved_by], attributes[:session_id], attributes[:data], attributes[:marshaled_data]
-        @new_record = @marshaled_data.nil? || @retrieved_by.nil?
+        @session_id, @data, @marshaled_data = attributes[:session_id], attributes[:data], attributes[:marshaled_data]
+        @new_record = @marshaled_data.nil?
       end
 
       def new_record?
@@ -266,16 +254,14 @@ module ActiveRecord
               #{@@connection.quote_column_name(@@session_id_column)},
               #{@@connection.quote_column_name(@@data_column)} )
             VALUES (
-              #{@@connection.quote(@session_id)},
+              #{@@connection.quote(session_id)},
               #{@@connection.quote(marshaled_data)} )
           end_sql
         else
           @@connection.update <<-end_sql, 'Update session'
             UPDATE #{@@table_name}
-            SET
-            #{@@connection.quote_column_name(@@data_column)}=#{@@connection.quote(marshaled_data)},
-            #{@@connection.quote_column_name(@@session_id_column)}=#{@@connection.quote(@session_id)}
-            WHERE #{@@connection.quote_column_name(@@session_id_column)}=#{@@connection.quote(@retrieved_by)}
+            SET #{@@connection.quote_column_name(@@data_column)}=#{@@connection.quote(marshaled_data)}
+            WHERE #{@@connection.quote_column_name(@@session_id_column)}=#{@@connection.quote(session_id)}
           end_sql
         end
       end
@@ -284,7 +270,7 @@ module ActiveRecord
         unless @new_record
           @@connection.delete <<-end_sql, 'Destroy session'
             DELETE FROM #{@@table_name}
-            WHERE #{@@connection.quote_column_name(@@session_id_column)}=#{@@connection.quote(@retrieved_by)}
+            WHERE #{@@connection.quote_column_name(@@session_id_column)}=#{@@connection.quote(session_id)}
           end_sql
         end
       end
@@ -296,11 +282,6 @@ module ActiveRecord
     self.session_class = Session
 
     SESSION_RECORD_KEY = 'rack.session.record'.freeze
-
-    def self.hash_session_id(public_session_id)
-      # mimick the hashin in Rack::Session::SessionId
-      "#{ID_PREFIX}#{Digest::SHA256.hexdigest(public_session_id)}"
-    end
 
     private
       def get_session(env, sid)
@@ -346,17 +327,8 @@ module ActiveRecord
       end
 
       def find_session(id)
-        private_id = self.class.hash_session_id(id)
-        session = if id.start_with?(ID_PREFIX)
-          # someone attempted to find session with a private id
-          nil
-        elsif (secure_session = @@session_class.find_by_session_id(private_id))
-          secure_session
-        elsif (insecure_session = @@session_class.find_by_session_id(id))
-          insecure_session.session_id = private_id
-          insecure_session
-        end
-        session || @@session_class.new(:session_id => private_id, :data => {})
+        @@session_class.find_by_session_id(id) ||
+          @@session_class.new(:session_id => id, :data => {})
       end
   end
 end
